@@ -19,7 +19,7 @@ type Patch struct {
 	len  int
 }
 
-var step = 5
+var step = 100000
 
 func min(x int, y int) int {
 	if x < y {
@@ -36,8 +36,6 @@ func GenerateFile(origin string, patchList *list.List) string {
 			result += patch.data
 			//println(patch.data)
 		} else {
-			//end := min(patch.pos+patch.len, len(origin))
-			//fmt.Printf("%d:%d    %d\n", patch.pos, patch.len, len(origin))
 			result += origin[patch.pos : patch.pos+patch.len]
 		}
 	}
@@ -49,9 +47,8 @@ func MakePatch(f2 string, blockMap map[string][]int) *list.List {
 	patchList := list.New()
 	var backItem *Patch
 
-	var bufA = -1
-	var bufB = -1
-	bflag := false
+	var bufA = -1 //差异开始段位置
+	var bufB = -1 //差异结束段位置
 
 	i := 0
 	for i = 0; i+step <= dataLen; {
@@ -59,18 +56,9 @@ func MakePatch(f2 string, blockMap map[string][]int) *list.List {
 		if patchList.Back() != nil {
 			backItem = patchList.Back().Value.(*Patch)
 		}
-		// if i+step > dataLen { //不足一个block的剩余
-		// 	// if backItem == nil || backItem.pos > -1 {
-		// 	// 	backItem = &Patch{pos: -1}
-		// 	// 	patchList.PushBack(backItem)
-		// 	// }
 
-		// 	// backItem.data += f2[i:len(f2)] //todo  优化
-		// 	break
-		// }
 		h := hash(f2[i : i+step])
 		if v, ok := blockMap[h]; ok {
-			bflag = true
 			if bufA != -1 {
 				backItem.data += f2[bufA:bufB]
 				bufA = -1
@@ -79,7 +67,7 @@ func MakePatch(f2 string, blockMap map[string][]int) *list.List {
 			//println(f2[i : i+step])
 			//fmt.Printf("find: %s   %d   %s\n", h, v[0], f2[i:i+step])
 
-			//优化 队列上一个元素不是字符串 或  间断
+			//优化 队列上一个元素不是字符串 或  间断块
 			if backItem == nil || backItem.pos == -1 || v[0] != backItem.pos+backItem.len {
 				backItem = &Patch{
 					pos: v[0],
@@ -93,38 +81,35 @@ func MakePatch(f2 string, blockMap map[string][]int) *list.List {
 			i += step
 
 		} else {
-			bflag = false
 			if backItem == nil || backItem.pos > -1 {
 				backItem = &Patch{
 					pos: -1,
 				}
 				patchList.PushBack(backItem)
 			}
-			//backItem.data += f2[i : i+1] //todo  优化
 
 			if bufA == -1 {
 				bufA = i
 				bufB = i
 			}
 			bufB++
-
 			i++
 		}
-
 		//println(i)
 	}
 
-	if !bflag && bufA > -1 {
+	//剩余差异内容
+	if bufA > -1 {
 		backItem.data += f2[bufA:bufB]
 	}
 
+	//剩余block处理
 	if i+step > dataLen { //不足一个block的剩余
 		if backItem == nil || backItem.pos > -1 {
 			backItem = &Patch{pos: -1}
 			patchList.PushBack(backItem)
 		}
-
-		backItem.data += f2[i:len(f2)] //todo  优化
+		backItem.data += f2[i:len(f2)]
 	}
 
 	return patchList
@@ -143,7 +128,7 @@ func Diff(f1 string, f2 string) bool {
 
 	//step3 run in server
 	result := GenerateFile(f1, patchList)
-	println("result: " + result)
+	//println("result: " + result)
 	return result == f2
 }
 
@@ -159,12 +144,10 @@ func RandString(n int) string {
 
 func main() {
 	rand.Seed(time.Now().UnixNano())
-	// f1 := "aaaaabbbbbcccccdddddaaaaae"
-	// f2 := "aeaddbbbbbbdddddaaaa"
 
 	t1 := time.Now() // get current time
-	for i := 0; i < 100000; i++ {
-		f1 := RandString(rand.Intn(100))
+	for i := 0; i < 1000000; i++ {
+		f1 := RandString(rand.Intn(1000))
 		f2 := RandString(rand.Intn(100))
 
 		//f1 = "bbcbba"
