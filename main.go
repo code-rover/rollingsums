@@ -19,7 +19,7 @@ type Patch struct {
 	len  int
 }
 
-var step = 100000
+var step = 5
 
 func min(x int, y int) int {
 	if x < y {
@@ -57,7 +57,7 @@ func MakePatch(f2 string, blockMap map[string][]int) *list.List {
 			backItem = patchList.Back().Value.(*Patch)
 		}
 
-		h := hash(f2[i : i+step])
+		h := md5sum([]byte(f2[i : i+step]))
 		if v, ok := blockMap[h]; ok {
 			if bufA != -1 {
 				backItem.data += f2[bufA:bufB]
@@ -115,12 +115,83 @@ func MakePatch(f2 string, blockMap map[string][]int) *list.List {
 	return patchList
 }
 
+type SumInfo struct {
+	sum1 uint32
+	sum2 []string
+}
+
+type SumList struct {
+	list []*SumInfo
+}
+
+func MakeSumList(data []byte) *SumList {
+	var sumList SumList
+	if len(data) < step {
+		return &sumList
+	}
+
+	sumMap := make(map[uint32]*SumInfo)
+
+	a := 1
+	b := 0
+	for i := 0; i < step; i++ {
+		println(data[i])
+		a += int(data[i])
+		b += a
+	}
+	a %= 65521
+	b %= 65521
+
+	sum1 := uint32(b<<16 | a&0xffff)
+	sum2 := md5sum([]byte(data[0:step]))
+
+	sumMap[sum1] = &SumInfo{
+		sum1: sum1,
+		sum2: []string{sum2},
+	}
+
+	for i := step; i < len(data); i++ {
+		a -= int(data[i-step])
+		a += int(data[i])
+		b -= step * int(data[i-step])
+		b--
+		b += a
+		a %= 65521
+		b %= 65521
+		sum1 = uint32(b<<16 | a&0xffff)
+		sum2 = md5sum([]byte(data[i-step : i]))
+
+		if _, ok := sumMap[sum1]; !ok {
+			sumMap[sum1] = &SumInfo{
+				sum1: sum1,
+			}
+		}
+		sumMap[sum1].sum2 = append(sumMap[sum1].sum2, sum2)
+	}
+
+	for _, v := range sumMap {
+		sumList.list = append(sumList.list, v)
+	}
+
+	return &sumList
+}
+
 func Diff(f1 string, f2 string) bool {
+
+	sumList := MakeSumList([]byte(f1))
+	for _, sum := range sumList.list {
+		//println(sum.sum1)
+		fmt.Printf("%x   %s\n", sum.sum1, sum.sum2[0])
+	}
+	return true
 	//step1  run in server
 	blockMap := make(map[string][]int)
-	for i := 0; i <= len(f1)-step; i += step {
-		h := hash(f1[i : i+step])
-		blockMap[h] = append(blockMap[h], i)
+
+	for i := step; i <= len(f1)-step; i += step {
+
+		//h := hash(f1[i : i+step])
+
+		//blockMap[h] = append(blockMap[h], i)
 	}
 
 	//step2 run in client
@@ -146,12 +217,12 @@ func main() {
 	rand.Seed(time.Now().UnixNano())
 
 	t1 := time.Now() // get current time
-	for i := 0; i < 1000000; i++ {
+	for i := 0; i < 1; i++ {
 		f1 := RandString(rand.Intn(1000))
 		f2 := RandString(rand.Intn(100))
 
-		//f1 = "bbcbba"
-		//f2 = "cbbbabbbbcbbaccababbbacbcccaaacabbbaabccbcaaaaabbbcbcbbaccaaabcabbbcbbbbcbbbaabc"
+		f1 = "abcdefghijklmnopqrst"
+		f2 = "cbbbabbbbcbbaccababbbacbcccaaacabbbaabccbcaaaaabbbcbcbbaccaaabcabbbcbbbbcbbbaabc"
 
 		//println(f1 + " <-----> " + f2)
 
@@ -159,18 +230,18 @@ func main() {
 			panic(f1 + "  " + f2)
 		}
 
-		if i%1000 == 0 {
-			println(i)
-		}
+		// if i%1000 == 0 {
+		// 	println(i)
+		// }
 	}
 	elapsed := time.Since(t1)
 	fmt.Println("App elapsed: ", elapsed)
 
 }
 
-func hash(str string) string {
+func md5sum(input []byte) string {
 	h := md5.New()
-	h.Write([]byte(str))
+	h.Write(input)
 	//return hex.EncodeToString(h.Sum(nil))[8:24]
 	return hex.EncodeToString(h.Sum(nil))
 }
