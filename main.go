@@ -1,91 +1,115 @@
 package main
 
 import (
-	"container/list"
+	"bytes"
 	"crypto/md5"
-	"encoding/hex"
 	"fmt"
+	"io/ioutil"
 	"math/rand"
 	"time"
+	"unsafe"
+
+	"github.com/pkg/profile"
 )
 
-type Block struct {
-	pos int
-}
-
 type Patch struct {
-	data string
+	data []byte
 	pos  int
 	len  int
 }
 
-var step = 5
+var step = 1024
 
-func min(x int, y int) int {
-	if x < y {
-		return x
-	}
-	return y
-}
-
-func GenerateFile(origin string, patchList *list.List) string {
-	result := ""
-	for e := patchList.Front(); e != nil; e = e.Next() {
-		patch := e.Value.(*Patch)
+func RebuildFile(origin []byte, patchList []*Patch) *bytes.Buffer {
+	var buf bytes.Buffer
+	for _, patch := range patchList {
 		if patch.pos == -1 {
-			result += patch.data
-			//println(patch.data)
+			buf.Write(patch.data)
+			// println("data: " + string(patch.data))
 		} else {
-			result += origin[patch.pos : patch.pos+patch.len]
+			// println("patch: " + string(origin[patch.pos:patch.pos+patch.len]))
+			buf.Write(origin[patch.pos : patch.pos+patch.len])
 		}
 	}
-	return result
+	return &buf
 }
 
-func MakePatch(f2 string, blockMap map[string][]int) *list.List {
+func Alder32Sum(data []byte) uint32 {
+	a := 1
+	b := 0
+	for i := 0; i < len(data); i++ {
+		a += int(data[i])
+		b += a
+	}
+	a %= 65521
+	b %= 65521
+
+	return uint32(b<<16 | a&0xffff)
+}
+
+func MakePatch(f2 []byte, sumList *SumList) []*Patch {
+	blockMap := make(map[uint32][]*SumPos, len(sumList.list))
+	for i := 0; i < len(sumList.list); i++ {
+		blockMap[sumList.list[i].sum1] = sumList.list[i].sum2
+	}
+
 	dataLen := len(f2)
-	patchList := list.New()
+
+	patchList := make([]*Patch, 0, len(sumList.list))
 	var backItem *Patch
 
 	var bufA = -1 //差异开始段位置
 	var bufB = -1 //差异结束段位置
-
 	i := 0
+
 	for i = 0; i+step <= dataLen; {
 		backItem = nil
-		if patchList.Back() != nil {
-			backItem = patchList.Back().Value.(*Patch)
+		if len(patchList) > 0 {
+			backItem = patchList[len(patchList)-1]
 		}
 
-		h := md5sum([]byte(f2[i : i+step]))
-		if v, ok := blockMap[h]; ok {
+		sum1 := Alder32Sum(f2[i : i+step])
+		sum2List, isSum1Exist := blockMap[sum1]
+		sumPos := -1
+		if isSum1Exist { //需要继续检查sum2
+			for _, sum2Pos := range sum2List {
+				if sum2Pos.sum2 == md5sum(f2[i:i+step]) {
+					sumPos = sum2Pos.pos
+					// fmt.Printf("sumPos: %d  str: %s\n", sumPos, f2[i:i+step])
+					break
+				}
+			}
+		}
+
+		if isSum1Exist && sumPos > -1 {
 			if bufA != -1 {
-				backItem.data += f2[bufA:bufB]
+				buf := bytes.NewBuffer(backItem.data)
+				buf.Write(f2[bufA:bufB])
+				backItem.data = buf.Bytes()
 				bufA = -1
 				bufB = -1
 			}
-			//println(f2[i : i+step])
-			//fmt.Printf("find: %s   %d   %s\n", h, v[0], f2[i:i+step])
+			// fmt.Printf("find: %d   %d   %s\n", sum1, sumPos, f2[i:i+step])
 
 			//优化 队列上一个元素不是字符串 或  间断块
-			if backItem == nil || backItem.pos == -1 || v[0] != backItem.pos+backItem.len {
+			if backItem == nil || backItem.pos == -1 || sumPos != backItem.pos+backItem.len {
 				backItem = &Patch{
-					pos: v[0],
+					pos: sumPos,
 					len: step,
 				}
-				patchList.PushBack(backItem)
+				patchList = append(patchList, backItem)
 			} else {
 				backItem.len += step
 			}
 
 			i += step
 
-		} else {
+		} else { //差异部分
 			if backItem == nil || backItem.pos > -1 {
 				backItem = &Patch{
 					pos: -1,
 				}
-				patchList.PushBack(backItem)
+				patchList = append(patchList, backItem)
 			}
 
 			if bufA == -1 {
@@ -100,24 +124,33 @@ func MakePatch(f2 string, blockMap map[string][]int) *list.List {
 
 	//剩余差异内容
 	if bufA > -1 {
-		backItem.data += f2[bufA:bufB]
+		buf := bytes.NewBuffer(backItem.data)
+		buf.Write(f2[bufA:bufB])
+		backItem.data = buf.Bytes()
 	}
 
 	//剩余block处理
 	if i+step > dataLen { //不足一个block的剩余
 		if backItem == nil || backItem.pos > -1 {
 			backItem = &Patch{pos: -1}
-			patchList.PushBack(backItem)
+			patchList = append(patchList, backItem)
 		}
-		backItem.data += f2[i:len(f2)]
+		buf := bytes.NewBuffer(backItem.data)
+		buf.Write(f2[i:len(f2)])
+		backItem.data = buf.Bytes()
 	}
 
 	return patchList
 }
 
+type SumPos struct {
+	sum2 string
+	pos  int
+}
+
 type SumInfo struct {
 	sum1 uint32
-	sum2 []string
+	sum2 []*SumPos
 }
 
 type SumList struct {
@@ -131,23 +164,20 @@ func MakeSumList(data []byte) *SumList {
 	}
 
 	sumMap := make(map[uint32]*SumInfo)
-
 	a := 1
 	b := 0
 	for i := 0; i < step; i++ {
-		println(data[i])
 		a += int(data[i])
 		b += a
 	}
 	a %= 65521
 	b %= 65521
-
 	sum1 := uint32(b<<16 | a&0xffff)
-	sum2 := md5sum([]byte(data[0:step]))
+	sum2 := md5sum(data[0:step])
 
 	sumMap[sum1] = &SumInfo{
 		sum1: sum1,
-		sum2: []string{sum2},
+		sum2: []*SumPos{{sum2, 0}},
 	}
 
 	for i := step; i < len(data); i++ {
@@ -166,7 +196,7 @@ func MakeSumList(data []byte) *SumList {
 				sum1: sum1,
 			}
 		}
-		sumMap[sum1].sum2 = append(sumMap[sum1].sum2, sum2)
+		sumMap[sum1].sum2 = append(sumMap[sum1].sum2, &SumPos{sum2, i - step})
 	}
 
 	for _, v := range sumMap {
@@ -176,72 +206,100 @@ func MakeSumList(data []byte) *SumList {
 	return &sumList
 }
 
-func Diff(f1 string, f2 string) bool {
+func Diff(f1 []byte, f2 []byte) bool {
 
-	sumList := MakeSumList([]byte(f1))
-	for _, sum := range sumList.list {
-		//println(sum.sum1)
-		fmt.Printf("%x   %s\n", sum.sum1, sum.sum2[0])
-	}
-	return true
+	//t := time.Now()
+	sumList := MakeSumList(f1)
+	//elapsed := time.Since(t)
+	//fmt.Println("MakeSumList elapsed: ", elapsed)
+	// for _, sum := range sumList.list {
+	// 	//println(sum.sum1)
+	// 	fmt.Printf("%x   %s\n", sum.sum1, sum.sum2[0].sum2)
+	// }
+	// return true
 	//step1  run in server
-	blockMap := make(map[string][]int)
+	// blockMap := make(map[string][]int)
 
-	for i := step; i <= len(f1)-step; i += step {
+	// for i := step; i <= len(f1)-step; i += step {
 
-		//h := hash(f1[i : i+step])
+	//h := hash(f1[i : i+step])
 
-		//blockMap[h] = append(blockMap[h], i)
-	}
+	//blockMap[h] = append(blockMap[h], i)
+	// }
 
 	//step2 run in client
-	patchList := MakePatch(f2, blockMap)
+	//t = time.Now()
+	patchList := MakePatch([]byte(f2), sumList)
+	//elapsed = time.Since(t)
+	//fmt.Println("MakePatch elapsed: ", elapsed)
 
 	//step3 run in server
-	result := GenerateFile(f1, patchList)
-	//println("result: " + result)
-	return result == f2
+	//t = time.Now()
+	rebuildData := RebuildFile(f1, patchList)
+
+	err := ioutil.WriteFile("./test/out.txt", rebuildData.Bytes(), 0644)
+	if err != nil {
+		panic(err)
+	}
+	//elapsed = time.Since(t)
+	//fmt.Println("RebuildFile elapsed: ", elapsed)
+	//println("result: " + string(result.Bytes()))
+	return bytes.Equal(rebuildData.Bytes(), f2)
+	//return result.Bytes() == f2
 }
 
-var letterRunes = []rune("abc")
+var letterRunes = []rune("abcdefghijklmnopqrstuvwxyz")
 
 func RandString(n int) string {
 	b := make([]rune, n)
 	for i := range b {
 		b[i] = letterRunes[rand.Intn(len(letterRunes))]
 	}
-	return string(b)
+	//return string(b)
+	return *(*string)(unsafe.Pointer(&b))
 }
 
 func main() {
+	defer profile.Start().Stop()
 	rand.Seed(time.Now().UnixNano())
 
 	t1 := time.Now() // get current time
 	for i := 0; i < 1; i++ {
 		f1 := RandString(rand.Intn(1000))
-		f2 := RandString(rand.Intn(100))
+		f2 := RandString(rand.Intn(1000))
 
-		f1 = "abcdefghijklmnopqrst"
-		f2 = "cbbbabbbbcbbaccababbbacbcccaaacabbbaabccbcaaaaabbbcbcbbaccaaabcabbbcbbbbcbbbaabc"
+		//f1 := "bacbccbbcaacabbbcbbcabaaaabacbcaababbbcabbaccacaabaccacacbbccbbaacbcbbccabaaac"
+		//f2 := "bbbbbbacbcacbbcbcbbbccabccbcbbcacbcccaabaaacbcbaabbcbbbcacabbbccsfafsefasccccc"
 
 		//println(f1 + " <-----> " + f2)
 
-		if !Diff(f1, f2) {
+		fileData1, err := ioutil.ReadFile("./test/a.txt")
+		if err != nil {
+			panic(err)
+		}
+		fileData2, err := ioutil.ReadFile("./test/b.txt")
+		if err != nil {
+			panic(err)
+		}
+
+		if !Diff(fileData1, fileData2) {
 			panic(f1 + "  " + f2)
 		}
 
-		// if i%1000 == 0 {
-		// 	println(i)
-		// }
+		if i%1000 == 0 {
+			println(i)
+		}
 	}
 	elapsed := time.Since(t1)
 	fmt.Println("App elapsed: ", elapsed)
 
 }
 
+var h = md5.New()
+
 func md5sum(input []byte) string {
-	h := md5.New()
+	h.Reset()
 	h.Write(input)
-	//return hex.EncodeToString(h.Sum(nil))[8:24]
-	return hex.EncodeToString(h.Sum(nil))
+	return *(*string)(unsafe.Pointer(&input))
+	//return string(h.Sum(nil))
 }
