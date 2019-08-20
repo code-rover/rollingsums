@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/md5"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"time"
 	"unsafe"
@@ -18,7 +17,7 @@ type Patch struct {
 	len  int
 }
 
-var step = 1024
+var step = 500
 
 func RebuildFile(origin []byte, patchList []*Patch) *bytes.Buffer {
 	var buf bytes.Buffer
@@ -43,8 +42,23 @@ func Alder32Sum(data []byte) uint32 {
 	}
 	a %= 65521
 	b %= 65521
-
 	return uint32(b<<16 | a&0xffff)
+}
+
+//根据之前结果增量计算
+func Alder32SumBasedOnPrev(data []byte, curPos int, prev uint32) uint32 {
+	d1 := uint32(data[curPos-step])
+	d2 := uint32(data[curPos])
+	prevA := prev & 0xffff
+	prevB := (prev >> 16) & 0xffff
+	prevA -= d1
+	prevA += d2
+	prevB -= uint32(step) * d1
+	prevB--
+	prevB += prevA
+	prevA %= 65521
+	prevB %= 65521
+	return prevB<<16 | prevA&0xffff
 }
 
 func MakePatch(f2 []byte, sumList *SumList) []*Patch {
@@ -62,13 +76,20 @@ func MakePatch(f2 []byte, sumList *SumList) []*Patch {
 	var bufB = -1 //差异结束段位置
 	i := 0
 
+	var sum1 uint32
+
 	for i = 0; i+step <= dataLen; {
 		backItem = nil
 		if len(patchList) > 0 {
 			backItem = patchList[len(patchList)-1]
 		}
 
-		sum1 := Alder32Sum(f2[i : i+step])
+		if bufA != -1 && i > step && sum1 > 0 {
+			sum1 = Alder32SumBasedOnPrev(f2, i, sum1) //根据上一结果增量计算,bufA不等于-1意味着上一步是连续差异数据，可以借用上次结果增量计算本次alder32值
+		} else {
+			sum1 = Alder32Sum(f2[i : i+step])
+		}
+
 		sum2List, isSum1Exist := blockMap[sum1]
 		sumPos := -1
 		if isSum1Exist { //需要继续检查sum2
@@ -164,39 +185,19 @@ func MakeSumList(data []byte) *SumList {
 	}
 
 	sumMap := make(map[uint32]*SumInfo)
-	a := 1
-	b := 0
-	for i := 0; i < step; i++ {
-		a += int(data[i])
-		b += a
-	}
-	a %= 65521
-	b %= 65521
-	sum1 := uint32(b<<16 | a&0xffff)
-	sum2 := md5sum(data[0:step])
 
-	sumMap[sum1] = &SumInfo{
-		sum1: sum1,
-		sum2: []*SumPos{{sum2, 0}},
-	}
-
-	for i := step; i < len(data); i++ {
-		a -= int(data[i-step])
-		a += int(data[i])
-		b -= step * int(data[i-step])
-		b--
-		b += a
-		a %= 65521
-		b %= 65521
-		sum1 = uint32(b<<16 | a&0xffff)
-		sum2 = md5sum([]byte(data[i-step : i]))
+	for i := 0; i <= len(data)-step; i += step {
+		sum1 := Alder32Sum(data[i : i+step])
+		sum2 := md5sum(data[i : i+step])
 
 		if _, ok := sumMap[sum1]; !ok {
 			sumMap[sum1] = &SumInfo{
 				sum1: sum1,
+				sum2: []*SumPos{{sum2: sum2, pos: i}},
 			}
+		} else {
+			sumMap[sum1].sum2 = append(sumMap[sum1].sum2, &SumPos{sum2, i})
 		}
-		sumMap[sum1].sum2 = append(sumMap[sum1].sum2, &SumPos{sum2, i - step})
 	}
 
 	for _, v := range sumMap {
@@ -237,10 +238,10 @@ func Diff(f1 []byte, f2 []byte) bool {
 	//t = time.Now()
 	rebuildData := RebuildFile(f1, patchList)
 
-	err := ioutil.WriteFile("./test/out.txt", rebuildData.Bytes(), 0644)
-	if err != nil {
-		panic(err)
-	}
+	// err := ioutil.WriteFile("./test/out.txt", rebuildData.Bytes(), 0644)
+	// if err != nil {
+	// 	panic(err)
+	// }
 	//elapsed = time.Since(t)
 	//fmt.Println("RebuildFile elapsed: ", elapsed)
 	//println("result: " + string(result.Bytes()))
@@ -264,25 +265,25 @@ func main() {
 	rand.Seed(time.Now().UnixNano())
 
 	t1 := time.Now() // get current time
-	for i := 0; i < 1; i++ {
-		f1 := RandString(rand.Intn(1000))
-		f2 := RandString(rand.Intn(1000))
+	for i := 0; i < 10000; i++ {
+		f1 := RandString(rand.Intn(100000))
+		f2 := RandString(rand.Intn(100000))
 
 		//f1 := "bacbccbbcaacabbbcbbcabaaaabacbcaababbbcabbaccacaabaccacacbbccbbaacbcbbccabaaac"
 		//f2 := "bbbbbbacbcacbbcbcbbbccabccbcbbcacbcccaabaaacbcbaabbcbbbcacabbbccsfafsefasccccc"
 
 		//println(f1 + " <-----> " + f2)
 
-		fileData1, err := ioutil.ReadFile("./test/a.txt")
-		if err != nil {
-			panic(err)
-		}
-		fileData2, err := ioutil.ReadFile("./test/b.txt")
-		if err != nil {
-			panic(err)
-		}
+		// fileData1, err := ioutil.ReadFile("./test/a.txt")
+		// if err != nil {
+		// 	panic(err)
+		// }
+		// fileData2, err := ioutil.ReadFile("./test/b.txt")
+		// if err != nil {
+		// 	panic(err)
+		// }
 
-		if !Diff(fileData1, fileData2) {
+		if !Diff([]byte(f1), []byte(f2)) {
 			panic(f1 + "  " + f2)
 		}
 
